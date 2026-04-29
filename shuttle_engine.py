@@ -138,15 +138,33 @@ def compute_compound_status(stock_df, compounds_df):
 
 def get_inbound_ready(inbound_df):
     rel = get_relationship_table()
-    inbound_df["vehicle_key"] = inbound_df["Model and Trim"] + " | " + inbound_df["Color Code"]
+
+    inbound_df["vehicle_key"] = (
+        inbound_df["Model and Trim"].astype(str).str.strip() + " | " +
+        inbound_df["Color Code"].astype(str).str.strip()
+    )
+
     inbound = inbound_df.merge(rel, how="left", on="vehicle_key")
 
-    if inbound["product"].isna().any():
-        missing = inbound[inbound["product"].isna()]["vehicle_key"].unique()
-        raise Exception(f"Missing mapping: {missing}")
+    # Separar os que têm mapping válido dos que falharam
+    mapped = inbound[inbound["product"].notna()].copy()
+    missing = inbound[inbound["product"].isna()].copy()
 
-    inbound = inbound.rename(columns={"VIN":"vin"})
-    return inbound[["vin","product"]]
+    if not missing.empty:
+        # Mostrar no log (visível no Streamlit Cloud logs)
+        print("⚠️ VINs sem mapeamento:")
+        for _, row in missing.iterrows():
+            print(f"  - VIN: {row['VIN']} | Key: '{row['vehicle_key']}'")
+        # Em vez de levantar exceção, podemos só avisar e seguir
+        # (opcionalmente, usar st.warning se estivermos dentro do Streamlit, mas aqui estamos numa função pura)
+
+    # Levantar erro ou simplesmente ignorar?
+    # Se quiseres parar completamente, descomenta a linha seguinte:
+    # raise Exception(f"Missing mapping for VINs: {missing['VIN'].tolist()}")
+    # Para ignorar e continuar, mantém como está (só os mapeados serão processados)
+
+    inbound_mapped = mapped.rename(columns={"VIN": "vin"})
+    return inbound_mapped[["vin", "product"]], missing  # retorna também os falhados
 
 # ============================================================
 # MOTOR DE DECISÃO COM BALANCEAMENTO LOGÍSTICO
@@ -279,9 +297,12 @@ def plan_shuttle(inbound_df, stock_by_model, compounds_status, logistic_weight=0
 def run_engine(dataverse_df, inbound_df, compounds_df, logistic_weight=0.3):
     stock = get_current_stock(dataverse_df)
     compounds_operational, compounds_reporting = compute_compound_status(stock, compounds_df)
-    inbound_ready = get_inbound_ready(inbound_df)
 
-    shuttle_plan = plan_shuttle(
-        inbound_ready, stock, compounds_operational, logistic_weight
-    )
+    inbound_ready, missing_mapping = get_inbound_ready(inbound_df)
+
+    # Se houver mapeamentos em falta, podes guardá-los na sessão para mostrar no frontend
+    if not missing_mapping.empty:
+        st.warning(f"{len(missing_mapping)} VINs ignorados por falta de mapeamento.")
+
+    shuttle_plan = plan_shuttle(inbound_ready, stock, compounds_operational, logistic_weight)
     return shuttle_plan, compounds_reporting, stock
